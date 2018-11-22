@@ -67,6 +67,7 @@ pub enum Error {
     Gid(String),
     InvalidInstanceId(validators::Error),
     Metadata(PathBuf, io::Error),
+    MissingArgument(&'static str),
     MissingParent(PathBuf),
     MkdirOldRoot(sys_util::Error),
     MknodDevNetTun(sys_util::Error),
@@ -84,6 +85,7 @@ pub enum Error {
     ReadToString(PathBuf, io::Error),
     RegEx(regex::Error),
     RmOldRootDir(sys_util::Error),
+    SeccompLevel(std::num::ParseIntError),
     SetCurrentDir(io::Error),
     SetNetNs(sys_util::Error),
     SetSid(sys_util::Error),
@@ -96,7 +98,6 @@ pub enum Error {
     UnsetCloexec(sys_util::Error),
     Write(PathBuf, io::Error),
 }
-
 pub type Result<T> = result::Result<T, Error>;
 
 pub fn clap_app<'a, 'b>() -> App<'a, 'b> {
@@ -223,8 +224,12 @@ pub fn run(args: ArgMatches, start_time_us: u64, start_time_cpu_us: u64) -> Resu
         .map_err(|e| Error::CreateDir(env.chroot_dir().to_owned(), e))?;
 
     // The unwrap should not fail, since the end of chroot_dir looks like ..../<id>/root
-    let listener = UnixListener::bind(env.chroot_dir().parent().unwrap().join(SOCKET_FILE_NAME))
-        .map_err(|e| Error::UnixListener(e))?;
+    let listener = UnixListener::bind(
+        env.chroot_dir()
+            .parent()
+            .ok_or(Error::MissingParent(env.chroot_dir().to_path_buf()))?
+            .join(SOCKET_FILE_NAME),
+    ).map_err(|e| Error::UnixListener(e))?;
 
     let listener_fd = listener.as_raw_fd();
     if listener_fd != LISTENER_FD {
