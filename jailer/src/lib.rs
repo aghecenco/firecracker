@@ -143,7 +143,7 @@ impl fmt::Display for Error {
             FromBytesWithNul(ref bytes) => {
                 write!(f, "Failed to decode string from byte array: {:?}", bytes)
             }
-            GetOldFdFlags(ref err) => write!(f, "Failed to get flags from fs: {}", err),
+            GetOldFdFlags(ref err) => write!(f, "Failed to get flags from fd: {}", err),
             Gid(ref gid) => write!(f, "Invalid gid: {}", gid),
             InvalidInstanceId(ref err) => write!(f, "Invalid instance ID: {}", err),
             MissingArgument(ref arg) => write!(f, "Missing argument: {}", arg),
@@ -379,4 +379,265 @@ fn to_cstring<T: AsRef<Path>>(path: T) -> Result<CString> {
         .into_string()
         .map_err(|e| Error::OsStringParsing(path.as_ref().to_path_buf(), e))?;
     CString::new(path_str).map_err(Error::CStringParsing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display() {
+        let path = PathBuf::from("/foo");
+        let file_str = "/foo/bar";
+        let file_path = PathBuf::from(file_str);
+        let proc_mounts = "/proc/mounts";
+        let controller = "sysfs";
+        let id = "foobar";
+        let err42 = sys_util::Error::new(42);
+        let err_regex = regex::Error::Syntax(id.to_string());
+        let err_parse = i8::from_str_radix("129", 10).unwrap_err();
+        let err2_str = "Os { code: 2, kind: NotFound, message: \"No such file or directory\" }";
+
+        assert_eq!(
+            format!(
+                "{}",
+                Error::Canonicalize(path.clone(), io::Error::from_raw_os_error(2))
+            ),
+            format!("Failed to canonicalize path \"/foo\": {}", err2_str)
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::CgroupInheritFromParent(path.clone(), file_str.to_string())
+            ),
+            "Failed to inherit cgroups configurations from file /foo/bar in path \"/foo\"",
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::CgroupLineNotFound(proc_mounts.to_string(), controller.to_string())
+            ),
+            "sysfs configurations not found in /proc/mounts",
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::CgroupLineNotUnique(proc_mounts.to_string(), controller.to_string())
+            ),
+            "Found more than one cgroups configuration line in /proc/mounts for sysfs",
+        );
+        assert_eq!(
+            format!("{}", Error::ChangeDevNetTunOwner(err42.clone())),
+            "Failed to change owner for /dev/net/tun: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::Chroot(err42.clone())),
+            "Failed to chroot into the new jail folder: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::CloseNetNsFd(err42.clone())),
+            "Failed to close netns fd: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::CloseDevNullFd(err42.clone())),
+            "Failed to close /dev/null fd: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::CloseDevNullFd(err42.clone())),
+            "Failed to close /dev/null fd: Errno 42",
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::Copy(
+                    file_path.clone(),
+                    path.clone(),
+                    io::Error::from_raw_os_error(2)
+                )
+            ),
+            format!(
+                "Failed to copy \"/foo/bar\" to \"/foo\": error {}",
+                err2_str
+            )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::CreateDir(path.clone(), io::Error::from_raw_os_error(2))
+            ),
+            format!("Failed to create directory \"/foo\": error {}", err2_str)
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::CStringParsing(CString::new(b"f\0oo".to_vec()).unwrap_err())
+            ),
+            "Encountered interior \\0 while parsing a string",
+        );
+        assert_eq!(
+            format!("{}", Error::Dup2(err42.clone())),
+            "Failed to duplicate fd: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::Exec(io::Error::from_raw_os_error(2))),
+            format!("Failed to exec into Firecracker: error {}", err2_str)
+        );
+        assert_eq!(
+            format!("{}", Error::FileName(file_path.clone())),
+            "Failed to extract filename from path \"/foo/bar\"",
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::FileOpen(file_path.clone(), io::Error::from_raw_os_error(2))
+            ),
+            format!("Failed to open file \"/foo/bar\": error {}", err2_str)
+        );
+        assert_eq!(
+            format!("{}", Error::FromBytesWithNul(b"/\0")),
+            "Failed to decode string from byte array: [47, 0]",
+        );
+        assert_eq!(
+            format!("{}", Error::GetOldFdFlags(err42.clone())),
+            "Failed to get flags from fd: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::Gid(id.to_string())),
+            "Invalid gid: foobar",
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::InvalidInstanceId(validators::Error::InvalidChar('a', 1))
+            ),
+            "Invalid instance ID: invalid char (a) at position 1",
+        );
+        assert_eq!(
+            format!("{}", Error::MissingArgument(id)),
+            "Missing argument: foobar",
+        );
+        assert_eq!(
+            format!("{}", Error::MissingParent(file_path.clone())),
+            "File \"/foo/bar\" doesn't have a parent",
+        );
+        assert_eq!(
+            format!("{}", Error::MkdirOldRoot(err42.clone())),
+            "Failed to create the jail root directory before pivoting root: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::MknodDevNetTun(err42.clone())),
+            "Failed to create /dev/net/tun via mknod inside the jail: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::MountBind(err42.clone())),
+            "Failed to bind mount the jail root directory: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::MountPropagationPrivate(err42.clone())),
+            "Failed to change the propagation type to private: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::NotAFile(file_path.clone())),
+            "\"/foo/bar\" is not a file",
+        );
+        assert_eq!(
+            format!("{}", Error::NumaNode(id.to_string())),
+            "Invalid numa node: foobar",
+        );
+        assert_eq!(
+            format!("{}", Error::OpenDevKvm(err42.clone())),
+            "Failed to open /dev/kvm: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::OpenDevNull(err42.clone())),
+            "Failed to open /dev/null: Errno 42",
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::OsStringParsing(file_path.clone(), file_path.clone().into_os_string())
+            ),
+            "Failed to parse path \"/foo/bar\" into an OsString",
+        );
+        assert_eq!(
+            format!("{}", Error::PivotRoot(err42.clone())),
+            "Failed to pivot root: Errno 42",
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::ReadLine(file_path.clone(), io::Error::from_raw_os_error(2))
+            ),
+            format!("Failed to read line from \"/foo/bar\": error {}", err2_str)
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::ReadToString(file_path.clone(), io::Error::from_raw_os_error(2))
+            ),
+            format!(
+                "Failed to read file \"/foo/bar\" into a string: error {}",
+                err2_str
+            )
+        );
+        assert_eq!(
+            format!("{}", Error::RegEx(err_regex.clone())),
+            format!("Regex failed: {:?}", err_regex),
+        );
+        assert_eq!(
+            format!("{}", Error::RmOldRootDir(err42.clone())),
+            "Failed to remove old jail root directory: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::SeccompLevel(err_parse.clone())),
+            "Failed to parse seccomp level: error ParseIntError { kind: Overflow }",
+        );
+        assert_eq!(
+            format!("{}", Error::SetCurrentDir(io::Error::from_raw_os_error(2))),
+            format!("Failed to change current directory: error {}", err2_str),
+        );
+        assert_eq!(
+            format!("{}", Error::SetNetNs(err42.clone())),
+            "Failed to join network namespace: netns: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::SetSid(err42.clone())),
+            "Failed to daemonize: setsid: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::Uid(id.to_string())),
+            "Invalid uid: foobar",
+        );
+        assert_eq!(
+            format!("{}", Error::UmountOldRoot(err42.clone())),
+            "Failed to unmount the old jail root: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::UnexpectedKvmFd(42)),
+            "Unexpected value for the /dev/kvm fd: 42",
+        );
+        assert_eq!(
+            format!("{}", Error::UnexpectedListenerFd(42)),
+            "Unexpected value for the socket listener fd: 42",
+        );
+        assert_eq!(
+            format!("{}", Error::UnshareNewNs(err42.clone())),
+            "Failed to unshare into new mount namespace: Errno 42",
+        );
+        assert_eq!(
+            format!("{}", Error::UnixListener(io::Error::from_raw_os_error(2))),
+            format!("Failed to bind to the Unix socket: error {}", err2_str),
+        );
+        assert_eq!(
+            format!("{}", Error::UnsetCloexec(err42.clone())),
+            "Failed to unset the O_CLOEXEC flag on the socket fd: Errno 42",
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::Write(file_path, io::Error::from_raw_os_error(2))
+            ),
+            format!("Failed to write to \"/foo/bar\": error {}", err2_str),
+        );
+    }
 }
