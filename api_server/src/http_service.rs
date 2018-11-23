@@ -465,7 +465,9 @@ impl hyper::server::Service for ApiServerHttpService {
                         METRICS.get_api_requests.instance_info_count.inc();
 
                         // unwrap() to crash if the other thread poisoned this lock
-                        let shared_info = shared_info_lock.read().unwrap();
+                        let shared_info = shared_info_lock
+                            .read()
+                            .expect("Failed to read shared_info: poisoned lock");
                         // Serialize it to a JSON string.
                         let body_result = serde_json::to_string(&(*shared_info));
                         match body_result {
@@ -481,7 +483,9 @@ impl hyper::server::Service for ApiServerHttpService {
                         }
                     }
                     PatchMMDS(json_value) => {
-                        let mut mmds = mmds_info.lock().unwrap();
+                        let mut mmds = mmds_info
+                            .lock()
+                            .expect("Failed to acquire lock on MMDS info");
                         match mmds.is_initialized() {
                             true => {
                                 mmds.patch_data(json_value);
@@ -494,16 +498,26 @@ impl hyper::server::Service for ApiServerHttpService {
                         }
                     }
                     PutMMDS(json_value) => {
-                        let status_code = match mmds_info.lock().unwrap().is_initialized() {
+                        let status_code = match mmds_info
+                            .lock()
+                            .expect("Failed to acquire lock on MMDS info")
+                            .is_initialized()
+                        {
                             true => StatusCode::NoContent,
                             false => StatusCode::Created,
                         };
-                        mmds_info.lock().unwrap().put_data(json_value);
+                        mmds_info
+                            .lock()
+                            .expect("Failed to acquire lock on MMDS info")
+                            .put_data(json_value);
                         Either::A(future::ok(empty_response(status_code)))
                     }
                     GetMMDS => Either::A(future::ok(json_response(
                         StatusCode::Ok,
-                        mmds_info.lock().unwrap().get_data_str(),
+                        mmds_info
+                            .lock()
+                            .expect("Failed to acquire lock on MMDS info")
+                            .get_data_str(),
                     ))),
                     Sync(sync_req, outcome_receiver) => {
                         if send_to_vmm(sync_req, &api_request_sender, &vmm_send_event).is_err() {
@@ -602,7 +616,10 @@ mod tests {
                 Ok::<_, hyper::Error>(acc)
             }).and_then(move |value| Ok(value));
 
-        String::from_utf8_lossy(&ret.wait().unwrap()).into()
+        String::from_utf8_lossy(
+            &ret.wait()
+                .expect("Failed to convert request body into String: polling the Future failed"),
+        ).into()
     }
 
     fn get_dummy_serde_error() -> serde_json::Error {
