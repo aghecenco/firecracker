@@ -279,6 +279,55 @@ impl MemoryMapping {
         Ok(())
     }
 
+    /// Uses `madvise` to tell the kernel to remove the specified range.
+    ///
+    /// Subsequent reads to the pages in the range will return zero bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `mem_offset` - Remove from this offset.
+    /// * `count` - Number of bytes to remove.
+    ///
+    /// # Examples
+    ///
+    /// * Clear 128 bytes from the 1024 allocated.
+    ///
+    /// ```
+    /// # use memory_model::MemoryMapping;
+    /// # fn test_remove_range() -> Result<(), ()> {
+    /// #     let mut mem_map = MemoryMapping::new(1024).unwrap();
+    ///       mem_map.remove_range(0, 128).map_err(|_| ())?;
+    /// #     Ok(())
+    /// # }
+    /// ```
+    pub fn remove_range(&self, mem_offset: usize, count: usize) -> Result<()> {
+        self.range_end(mem_offset, count)
+            .map_err(|_| Error::InvalidRange(mem_offset, count))?;
+        let ret = unsafe {
+            // `madvise`-ing away the region is the same as the guest changing it.
+            // Next time it is read, it may return zero pages.
+            libc::madvise(
+                (self.addr as usize + mem_offset) as *mut _,
+                count,
+                libc::MADV_REMOVE,
+            )
+        };
+        if ret < 0 {
+            Err(Error::InvalidRange(mem_offset, count))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Check that `offset` + `count` is valid and return the sum.
+    fn range_end(&self, offset: usize, count: usize) -> Result<usize> {
+        let mem_end = offset.checked_add(count).ok_or(Error::InvalidAddress)?;
+        if mem_end > self.size() {
+            return Err(Error::InvalidAddress);
+        }
+        Ok(mem_end)
+    }
+
     unsafe fn as_slice(&self) -> &[u8] {
         // This is safe because we mapped the area at addr ourselves, so this slice will not
         // overflow. However, it is possible to alias.
@@ -308,7 +357,9 @@ mod tests {
     extern crate tempfile;
 
     use self::tempfile::tempfile;
+
     use super::*;
+
     use std::fs::File;
     use std::mem;
     use std::path::Path;
@@ -407,5 +458,41 @@ mod tests {
             mem_map.write_from_memory(2, &mut sink, mem::size_of::<u32>())
         );
         assert_eq!(sink, vec![0; mem::size_of::<u32>()]);
+    }
+
+    #[test]
+    fn mapped_file_read() {
+        let mut f = tempfile().unwrap();
+        let sample_buf = &[1, 2, 3, 4, 5];
+        assert!(f.write_all(sample_buf).is_ok());
+
+        let mem_map = MemoryMapping::from_fd(&f, sample_buf.len()).unwrap();
+        let buf = &mut [0u8; 16];
+        assert_eq!(mem_map.read_slice(buf, 0).unwrap(), sample_buf.len());
+        assert_eq!(buf[0..sample_buf.len()], sample_buf[..]);
+    }
+
+    #[test]
+    fn test_remove_range() {
+        let mem_map = MemoryMapping::new(10).unwrap();
+
+        assert_eq!(
+            format!("{:?}", mem_map.remove_range(1, 1)),
+            "Err(InvalidRange(1, 1))"
+        );
+        assert_eq!(
+            format!("{:?}", mem_map.remove_range(0, 11)),
+            "Err(InvalidRange(0, 11))"
+        );
+
+        // Write 42 at offset 0. Assert that reading from offset 0 yields 42.
+        assert!(mem_map.write_obj(42u32, 0).is_ok());
+        assert_eq!(mem_map.read_obj::<u32>(0).unwrap(), 42);
+
+        // Madvise 4 bytes at offset 0.
+        assert!(mem_map.remove_range(0, 4).is_ok());
+
+        // Reading from offset 0 succeeds and yields 0.
+        assert_eq!(mem_map.read_obj::<u32>(0).unwrap(), 0);
     }
 }

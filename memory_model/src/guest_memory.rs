@@ -462,11 +462,21 @@ impl GuestMemory {
         }
         Err(Error::InvalidGuestAddress(guest_addr))
     }
+
+    /// Madvise away the address range in the host that is associated with the given guest range.
+    pub fn remove_range(&self, addr: GuestAddress, count: usize) -> Result<()> {
+        self.do_in_region(addr, count, move |mapping, offset| {
+            mapping
+                .remove_range(offset, count)
+                .map_err(|e| Error::MemoryAccess(addr, e))
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::fs::File;
     use std::mem;
     use std::path::Path;
@@ -644,5 +654,23 @@ mod tests {
             ),
             3
         );
+    }
+
+    #[test]
+    fn test_remove_range() {
+        let start_addr1 = GuestAddress(0x0);
+        let mem = GuestMemory::new(&vec![(start_addr1, 1024)]).unwrap();
+
+        assert_eq!(
+            format!("{:?}", mem.remove_range(start_addr1, 1025)),
+            "Err(MemoryAccess(GuestAddress(0), InvalidRange(0, 1025)))"
+        );
+
+        assert!(mem.write_obj_at_addr(42u32, start_addr1).is_ok());
+        let val: u32 = mem.read_obj_from_addr(start_addr1).unwrap();
+        assert_eq!(val, 42);
+        assert!(mem.remove_range(start_addr1, 1).is_ok());
+        let val: u32 = mem.read_obj_from_addr(start_addr1).unwrap();
+        assert_eq!(val, 0);
     }
 }
