@@ -9,6 +9,7 @@
 use std;
 use std::io::Error as IOError;
 
+mod balloon;
 pub mod block;
 mod mmio;
 pub mod net;
@@ -16,6 +17,7 @@ mod queue;
 #[cfg(feature = "vsock")]
 pub mod vhost;
 
+pub use self::balloon::*;
 pub use self::block::*;
 pub use self::mmio::*;
 pub use self::net::*;
@@ -35,6 +37,7 @@ const DEVICE_FAILED: u32 = 0x80;
 /// Types taken from linux/virtio_ids.h.
 const TYPE_NET: u32 = 1;
 const TYPE_BLOCK: u32 = 2;
+const TYPE_BALLOON: u32 = 5;
 
 /// Interrupt flags (re: interrupt status & acknowledge registers).
 /// See linux/virtio_mmio.h.

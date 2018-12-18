@@ -13,3 +13,6 @@
 pub mod virtio_blk;
 pub mod virtio_net;
 pub mod virtio_ring;
+
+// HACK! This shouldn't go here but I want to compile this thing now
+pub const VIRTIO_F_VERSION_1: ::std::os::raw::c_uint = 32;

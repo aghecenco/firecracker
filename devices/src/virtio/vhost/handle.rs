@@ -5,8 +5,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use super::super::EpollHandlerPayload;
-use super::INTERRUPT_STATUS_USED_RING;
+use super::super::{EpollHandlerPayload, VIRTIO_MMIO_INT_VRING};
+use super::TYPE_VSOCK;
 
 use sys_util::EventFd;
 use vhost_backend::Vhost;
