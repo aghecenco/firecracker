@@ -13,11 +13,11 @@ use devices::virtio::{Block, MmioTransport, Net, TYPE_BLOCK, TYPE_NET};
 use logger::METRICS;
 use resources::VmResources;
 use rpc_interface::VmmActionError;
-use vmm_config;
 use vmm_config::drive::DriveError;
 use vmm_config::machine_config::VmConfig;
 use vmm_config::net::{NetworkInterfaceError, NetworkInterfaceUpdateConfig};
 use Vmm;
+use {vmm_config, DirtyBitmap};
 
 /// Shorthand result type for external VMM commands.
 pub type ActionResult = std::result::Result<(), VmmActionError>;
@@ -197,5 +197,13 @@ impl VmmController {
         }
 
         Ok(())
+    }
+
+    /// Retrieves the KVM dirty bitmap for each of the guest's memory regions.
+    pub fn get_dirty_bitmap(&self) -> std::result::Result<DirtyBitmap, VmmActionError> {
+        let vmm_handle = self.vmm.lock().unwrap();
+        vmm_handle
+            .get_dirty_bitmap()
+            .map_err(VmmActionError::InternalVmm)
     }
 }

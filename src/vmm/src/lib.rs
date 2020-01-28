@@ -49,6 +49,7 @@ pub mod signal_handler;
 pub mod vmm_config;
 mod vstate;
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::os::unix::io::AsRawFd;
@@ -68,7 +69,7 @@ use seccomp::{BpfProgram, BpfProgramRef, SeccompFilter};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
 use utils::time::TimestampUs;
-use vm_memory::GuestMemoryMmap;
+use vm_memory::{GuestMemory, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap};
 use vstate::{Vcpu, VcpuEvent, VcpuHandle, VcpuResponse, Vm};
 
 /// Success exit code.
@@ -99,6 +100,8 @@ pub enum Error {
     /// of resource exhaustion.
     #[cfg(target_arch = "x86_64")]
     CreateLegacyDevice(device_manager::legacy::Error),
+    /// Cannot fetch the KVM dirty bitmap.
+    DirtyBitmap(kvm_ioctls::Error),
     /// Cannot read from an Event file descriptor.
     EventFd(io::Error),
     /// Polly error wrapper.
@@ -136,7 +139,7 @@ pub enum Error {
     /// vCPU resume failed.
     VcpuResume,
     /// Cannot spawn a new Vcpu thread.
-    VcpuSpawn(std::io::Error),
+    VcpuSpawn(io::Error),
     /// Vm error.
     Vm(vstate::Error),
     /// Error thrown by observer object on Vmm initialization.
@@ -153,6 +156,7 @@ impl Display for Error {
             ConfigureSystem(e) => write!(f, "System configuration error: {:?}", e),
             #[cfg(target_arch = "x86_64")]
             CreateLegacyDevice(e) => write!(f, "Error creating legacy device: {:?}", e),
+            DirtyBitmap(e) => write!(f, "Error getting the KVM dirty bitmap. {}", e),
             EventFd(e) => write!(f, "Event fd error: {}", e),
             EventManager(e) => write!(f, "Event manager error: {:?}", e),
             I8042Error(e) => write!(f, "I8042 error: {}", e),
@@ -199,6 +203,9 @@ pub trait VmmEventsObserver {
 
 /// Shorthand result type for internal VMM commands.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Shorthand type for KVM dirty page bitmap.
+pub type DirtyBitmap = HashMap<usize, Vec<u64>>;
 
 /// Contains the state and associated methods required for the Firecracker VMM.
 pub struct Vmm {
@@ -372,6 +379,23 @@ impl Vmm {
     pub fn kvm_vm(&self) -> &Vm {
         &self.vm
     }
+
+    /// Retrieves the KVM dirty bitmap for each of the guest's memory regions.
+    pub fn get_dirty_bitmap(&self) -> Result<DirtyBitmap> {
+        let mut bitmap: DirtyBitmap = HashMap::new();
+        self.guest_memory.with_regions_mut(
+            |slot: usize, region: &GuestRegionMmap| -> Result<()> {
+                let bitmap_region = self
+                    .vm
+                    .fd()
+                    .get_dirty_log(slot as u32, region.len() as usize)
+                    .map_err(Error::DirtyBitmap)?;
+                bitmap.insert(slot, bitmap_region);
+                Ok(())
+            },
+        )?;
+        Ok(bitmap)
+    }
 }
 
 impl Subscriber for Vmm {
@@ -405,5 +429,229 @@ impl Subscriber for Vmm {
             EventSet::IN,
             self.exit_evt.as_raw_fd() as u64,
         )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate kernel;
+
+    use super::*;
+
+    use arch::arch_memory_regions;
+    #[cfg(target_arch = "x86_64")]
+    use device_manager::legacy::PortIODeviceManager;
+    use device_manager::mmio::MMIODeviceManager;
+    #[cfg(target_arch = "x86_64")]
+    use devices::legacy::Serial;
+    use kernel::cmdline::Cmdline;
+    use kvm_bindings::{kvm_userspace_memory_region, KVM_MEM_LOG_DIRTY_PAGES};
+    use kvm_ioctls::{VcpuExit, VcpuFd, VmFd};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use utils::eventfd::EventFd;
+    use vm_memory::{Address, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
+    use vstate::{KvmContext, Vm};
+
+    struct DeviceManagers {
+        mmio_device_manager: MMIODeviceManager,
+        #[cfg(target_arch = "x86_64")]
+        pio_device_manager: PortIODeviceManager,
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn create_guest_workload() -> (Vec<u8>, GuestAddress) {
+        // HLT instruction.
+        (vec![0xf4u8], GuestAddress(0))
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn create_guest_workload() -> (Vec<u8>, GuestAddress) {
+        (
+            vec![
+                0x01, 0x00, 0x00, 0x10, /* adr x1, <this address> */
+                0x22, 0x10, 0x00, 0xb9, /* str w2, [x1, #16]; write to this page */
+                0x02, 0x00, 0x00, 0xb9, /* str w2, [x0]; force MMIO exit */
+                0x00, 0x00, 0x00,
+                0x14, /* b <this address>; shouldn't get here, but if so loop forever */
+            ],
+            GuestAddress(arch::aarch64::layout::DRAM_MEM_START),
+        )
+    }
+
+    fn create_device_managers() -> DeviceManagers {
+        DeviceManagers {
+            mmio_device_manager: MMIODeviceManager::new(
+                &mut (arch::MMIO_MEM_START as u64),
+                (arch::IRQ_BASE, arch::IRQ_MAX),
+            ),
+            #[cfg(target_arch = "x86_64")]
+            pio_device_manager: PortIODeviceManager::new(
+                Arc::new(Mutex::new(Serial::new_sink(
+                    EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+                ))),
+                EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            )
+            .unwrap(),
+        }
+    }
+
+    fn create_guest_memory(mem_size: usize, vm_fd: &VmFd) -> GuestMemoryMmap {
+        let mem_regions = arch_memory_regions(mem_size);
+        let guest_memory = GuestMemoryMmap::from_ranges(&mem_regions).unwrap();
+        config_guest_memory(&guest_memory, false, vm_fd);
+        guest_memory
+    }
+
+    fn config_guest_memory(guest_memory: &GuestMemoryMmap, track_dirty_pages: bool, vm_fd: &VmFd) {
+        guest_memory
+            .with_regions(|index, region| {
+                // It's safe to unwrap because the guest address is valid.
+                let host_addr = guest_memory.get_host_address(region.start_addr()).unwrap();
+                let memory_region = kvm_userspace_memory_region {
+                    slot: index as u32,
+                    guest_phys_addr: region.start_addr().raw_value() as u64,
+                    memory_size: region.len() as u64,
+                    userspace_addr: host_addr as u64,
+                    flags: if track_dirty_pages {
+                        KVM_MEM_LOG_DIRTY_PAGES
+                    } else {
+                        0
+                    },
+                };
+                unsafe { vm_fd.set_user_memory_region(memory_region) }
+            })
+            .unwrap();
+    }
+
+    impl Vmm {
+        fn empty(mem_size_mib: Option<usize>) -> Self {
+            let kvm = KvmContext::new().unwrap();
+            let vm = Vm::new(kvm.fd()).unwrap();
+            let device_managers = create_device_managers();
+            let guest_memory = create_guest_memory(mem_size_mib.unwrap_or(1) << 20, vm.fd());
+            Self::new(guest_memory, vm, device_managers)
+        }
+
+        fn new(guest_memory: GuestMemoryMmap, vm: Vm, device_managers: DeviceManagers) -> Self {
+            Vmm {
+                events_observer: None,
+                guest_memory,
+                kernel_cmdline: Cmdline::new(100),
+                vcpus_handles: vec![],
+                exit_evt: EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+                vm,
+                mmio_device_manager: device_managers.mmio_device_manager,
+                #[cfg(target_arch = "x86_64")]
+                pio_device_manager: device_managers.pio_device_manager,
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        fn config_vcpu(&self, vcpu_fd: &mut VcpuFd, guest_addr: GuestAddress) {
+            // x86_64 specific registry setup.
+            let mut vcpu_sregs = vcpu_fd.get_sregs().unwrap();
+            vcpu_sregs.cs.base = 0;
+            vcpu_sregs.cs.selector = 0;
+            vcpu_fd.set_sregs(&vcpu_sregs).unwrap();
+
+            let mut vcpu_regs = vcpu_fd.get_regs().unwrap();
+            // Set the Instruction Pointer to the guest address where we loaded the code.
+            vcpu_regs.rip = guest_addr.0 as u64;
+            // Initial state for rflags register on x86_64.
+            vcpu_regs.rflags = 2;
+            vcpu_fd.set_regs(&vcpu_regs).unwrap();
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        fn config_vcpu(&self, vcpu_fd: &mut VcpuFd, guest_addr: GuestAddress) {
+            // aarch64 specific registry setup.
+            let mut kvi = kvm_bindings::kvm_vcpu_init::default();
+            self.vm.fd().get_preferred_target(&mut kvi).unwrap();
+            vcpu_fd.vcpu_init(&kvi).unwrap();
+
+            let core_reg_base: u64 = 0x6030_0000_0010_0000;
+            let mut mem_size = 0;
+            self.guest_memory
+                .with_regions_mut(|_, region| -> std::result::Result<(), std::io::Error> {
+                    mem_size += region.len();
+                    Ok(())
+                })
+                .unwrap();
+            let mmio_addr: u64 = (guest_addr.0 + mem_size) as u64;
+            vcpu_fd
+                .set_one_reg(core_reg_base + 2 * 32, guest_addr.0 as u64)
+                .unwrap(); // set PC
+            vcpu_fd
+                .set_one_reg(core_reg_base + 2 * 0, mmio_addr)
+                .unwrap(); // set X0
+        }
+
+        fn write_code_to_guest_memory(&self) -> GuestAddress {
+            let (asm_code, guest_addr) = create_guest_workload();
+            let host_addr = self.guest_memory.get_host_address(guest_addr).unwrap();
+            let code_slice: &mut [u8] =
+                unsafe { std::slice::from_raw_parts_mut(host_addr as *mut u8, asm_code.len()) };
+            code_slice.copy_from_slice(&asm_code);
+            guest_addr
+        }
+
+        // Prepare a VM with 1 MB memory and 1 vCPU.
+        // Dirty a page and run the VM.
+        // Return after the first VM exit.
+        fn setup_with_code_and_run(&mut self) {
+            // Fill guest memory with an asm code snippet.
+            let guest_addr = self.write_code_to_guest_memory();
+
+            // Create a vCPU.
+            let mut vcpu_fd = self.vm.fd().create_vcpu(0).unwrap();
+            self.config_vcpu(&mut vcpu_fd, guest_addr);
+
+            // Run the VM. It will trigger a vCPU exit.
+            match vcpu_fd.run().unwrap() {
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                VcpuExit::Hlt => (),
+                #[cfg(target_arch = "aarch64")]
+                VcpuExit::MmioWrite(_, _) => (),
+                exit_reason => panic!("unexpected exit reason: {:?}", exit_reason),
+            }
+        }
+
+        fn set_dirty_page_tracking(&self, track_dirty_pages: bool) {
+            config_guest_memory(self.guest_memory(), track_dirty_pages, self.vm.fd());
+        }
+    }
+
+    #[test]
+    fn test_dirty_bitmap() {
+        let mut vmm = Vmm::empty(None);
+
+        // Error case: dirty tracking off.
+        assert_eq!(
+            format!("{:?}", vmm.get_dirty_bitmap().err()),
+            "Some(DirtyBitmap(Error(2)))"
+        );
+
+        // VM didn't run => empty bitmap.
+        vmm.set_dirty_page_tracking(true);
+        let mut expected: DirtyBitmap = HashMap::new();
+        expected.insert(0, vec![0u64; 4]);
+        assert_eq!(expected, vmm.get_dirty_bitmap().unwrap());
+
+        // VM ran with dirty tracking off => KVM will not find any regions with dirty tracking on
+        // and will return ENOENT (2).
+        vmm.set_dirty_page_tracking(false);
+        vmm.setup_with_code_and_run();
+        assert_eq!(
+            format!("{:?}", vmm.get_dirty_bitmap().err()),
+            "Some(DirtyBitmap(Error(2)))"
+        );
+
+        // VM ran and dirtied 1 page.
+        let mut vmm = Vmm::empty(None);
+        vmm.set_dirty_page_tracking(true);
+        vmm.setup_with_code_and_run();
+        expected.insert(0, vec![1u64, 0u64, 0u64, 0u64]);
+        assert_eq!(expected, vmm.get_dirty_bitmap().unwrap());
     }
 }
