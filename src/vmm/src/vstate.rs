@@ -29,7 +29,7 @@ use kvm_bindings::{
     Msrs, KVM_CLOCK_TSC_STABLE, KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE,
     KVM_MAX_CPUID_ENTRIES, KVM_PIT_SPEAKER_DUMMY,
 };
-use kvm_bindings::{kvm_userspace_memory_region, KVM_API_VERSION};
+use kvm_bindings::{kvm_userspace_memory_region, KVM_API_VERSION, KVM_MEM_LOG_DIRTY_PAGES};
 use kvm_ioctls::*;
 use logger::{Metric, METRICS};
 use seccomp::{BpfProgram, SeccompFilter};
@@ -449,7 +449,7 @@ impl Vm {
                     guest_phys_addr: region.start_addr().raw_value() as u64,
                     memory_size: region.len() as u64,
                     userspace_addr: host_addr as u64,
-                    flags: 0,
+                    flags: KVM_MEM_LOG_DIRTY_PAGES,
                 };
                 // Safe because we mapped the memory region, we made sure that the regions
                 // are not overlapping.
