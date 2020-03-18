@@ -18,7 +18,6 @@ use vmm_config::drive::DriveError;
 use vmm_config::machine_config::VmConfig;
 use vmm_config::net::{NetworkInterfaceError, NetworkInterfaceUpdateConfig};
 use Vmm;
-
 /// Shorthand result type for external VMM commands.
 pub type ActionResult = std::result::Result<(), VmmActionError>;
 
@@ -39,6 +38,9 @@ impl VmmController {
     /// Defer to inner Vmm. We'll move to a variant where the Vmm simply exposes functionality like
     /// getting the dirty pages, and then we'll have the metrics flushing logic entirely on the outside.
     pub fn flush_metrics(&mut self) -> ActionResult {
+        // Hi there! I'm some code that really shouldn't be here! Don't let me go to prod!
+        self.vmm.lock().unwrap().enable_dirty_logging();
+
         // FIXME: we're losing the bool saying whether metrics were actually written.
         METRICS
             .write()
@@ -50,11 +52,15 @@ impl VmmController {
     /// Injects CTRL+ALT+DEL keystroke combo to the inner Vmm (if present).
     #[cfg(target_arch = "x86_64")]
     pub fn send_ctrl_alt_del(&mut self) -> ActionResult {
-        self.vmm
-            .lock()
-            .unwrap()
-            .send_ctrl_alt_del()
-            .map_err(VmmActionError::InternalVmm)
+        // Nope!
+        self.vmm.lock().unwrap().get_dirty_bitmap();
+        Ok(())
+
+        //        self.vmm
+        //            .lock()
+        //            .unwrap()
+        //            .send_ctrl_alt_del()
+        //            .map_err(VmmActionError::InternalVmm)
     }
 
     /// Creates a new `VmmController`.

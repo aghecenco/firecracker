@@ -72,8 +72,12 @@ use seccomp::{BpfProgram, BpfProgramRef, SeccompFilter};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
 use utils::time::TimestampUs;
-use vm_memory::GuestMemoryMmap;
+use vm_memory::{GuestMemoryMmap, GuestRegionMmap};
 use vstate::{Vcpu, VcpuEvent, VcpuHandle, VcpuResponse, Vm};
+
+use kvm_bindings::{kvm_userspace_memory_region, KVM_MEM_LOG_DIRTY_PAGES};
+use std::collections::HashMap;
+use vm_memory::{Address, GuestMemory, GuestMemoryRegion};
 
 /// Success exit code.
 pub const FC_EXIT_CODE_OK: u8 = 0;
@@ -224,6 +228,49 @@ pub struct Vmm {
 }
 
 impl Vmm {
+    /// Asdf.
+    pub fn enable_dirty_logging(&self) {
+        self.guest_memory
+            .with_regions(|index, region| {
+                // It's safe to unwrap because the guest address is valid.
+                let host_addr = self
+                    .guest_memory
+                    .get_host_address(region.start_addr())
+                    .unwrap();
+                let memory_region = kvm_userspace_memory_region {
+                    slot: index as u32,
+                    guest_phys_addr: region.start_addr().raw_value() as u64,
+                    memory_size: region.len() as u64,
+                    userspace_addr: host_addr as u64,
+                    flags: KVM_MEM_LOG_DIRTY_PAGES,
+                };
+                // Safe because we mapped the memory region, we made sure that the regions
+                // are not overlapping.
+                unsafe { self.vm.fd().set_user_memory_region(memory_region) }
+            })
+            .unwrap();
+    }
+
+    /// Asdf.
+    pub fn get_dirty_bitmap(&self) {
+        let mut bitmap: HashMap<usize, Vec<u64>> = HashMap::new();
+        self.guest_memory
+            .with_regions_mut(
+                |slot: usize,
+                 region: &GuestRegionMmap|
+                 -> std::result::Result<(), kvm_ioctls::Error> {
+                    let bitmap_region = self
+                        .vm
+                        .fd()
+                        .get_dirty_log(slot as u32, region.len() as usize)?;
+                    bitmap.insert(slot, bitmap_region);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        error!("Bitmap {:?}", bitmap);
+    }
+
     /// Gets the the specified bus device.
     pub fn get_bus_device(
         &self,
