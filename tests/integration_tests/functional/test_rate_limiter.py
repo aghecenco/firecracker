@@ -12,6 +12,10 @@ IPERF_BINARY = 'iperf3'
 # Interval used by iperf to get maximum bandwidth
 IPERF_TRANSMIT_TIME = 3
 
+# Interval to omit statistics collection at the beginning of the test, to skip
+# past the TCP slow-start period
+IPERF_OMIT_TIME = 1
+
 # The rate limiting value
 RATE_LIMIT_BYTES = 10485760
 
@@ -155,29 +159,33 @@ def _check_tx_rate_limiting(test_microvm, guest_ips, host_ips):
 
     # First step: get the transfer rate when no rate limiting is enabled.
     # We are receiving the result in KBytes from iperf; 1000 converts to Bytes.
-    iperf_cmd = '{} -c {} -t{} -f KBytes'.format(
+    iperf_cmd = '{} -c {} -t{} -f KBytes -O {}'.format(
         IPERF_BINARY,
         host_ips[0],
-        IPERF_TRANSMIT_TIME
+        IPERF_TRANSMIT_TIME,
+        IPERF_OMIT_TIME
     )
 
     iperf_out = _run_iperf_on_guest(test_microvm, iperf_cmd, guest_ips[0])
     iperf_out = _process_iperf_output(iperf_out)[1]
 
     rate_no_limit_bytes = 1000 * float(iperf_out)
+#     print('rate_no_limit_bytes {}'.format(rate_no_limit_bytes))
 
     # Second step: get the number of bytes when rate limiting is on.
 
     # Calculate the number of bytes that are expected to be sent
     # in each second once the rate limiting is enabled.
     rate_limit_bps = 1000 * RATE_LIMIT_BYTES / float(RATE_LIMIT_REFILL_TIME)
+#     print('rate_limit_bps {}'.format(rate_limit_bps))
 
     # Use iperf for some number of seconds to get the number of bytes it sent
     # with rate limiting on.
-    iperf_cmd = '{} -c {} -t{} -f KBytes'.format(
+    iperf_cmd = '{} -c {} -t{} -f KBytes -O {}'.format(
         IPERF_BINARY,
         host_ips[1],
-        IPERF_TRANSMIT_TIME
+        IPERF_TRANSMIT_TIME,
+        IPERF_OMIT_TIME
     )
     iperf_out = _run_iperf_on_guest(
         test_microvm, iperf_cmd, guest_ips[1]
@@ -186,6 +194,7 @@ def _check_tx_rate_limiting(test_microvm, guest_ips, host_ips):
 
     rate_limit_bytes_achieved = 1000 * float(iperf_out)
     rate_limit_bytes_expected = rate_limit_bps
+#     print('rate_limit_bytes_achieved {}\nrate_limit_bytes_expected {}'.format(rate_limit_bytes_achieved, rate_limit_bytes_expected))
 
     # Assert on the bytes expected and achieved with rate limiting on; we are
     # expecting a difference no bigger than MAX_RATE_LIMIT_BYTES_DIFF
@@ -216,7 +225,9 @@ def _check_tx_rate_limiting(test_microvm, guest_ips, host_ips):
     # We are sending the amount of bytes that can be sent in 1 sec with rate
     # limiting enabled.
     iperf_cmd = '{} -c {} -n{} -f KBytes'.format(
-        IPERF_BINARY, host_ips[2], rate_limit_bps
+        IPERF_BINARY,
+        host_ips[2],
+        rate_limit_bps
     )
     iperf_out = _run_iperf_on_guest(test_microvm, iperf_cmd, guest_ips[2])
     iperf_out_time, iperf_out_bw = _process_iperf_output(iperf_out)
@@ -224,9 +235,12 @@ def _check_tx_rate_limiting(test_microvm, guest_ips, host_ips):
     # Test that the bandwidth we obtained first time is at least as two times
     # higher than the one obtained when rate limiting is on.
     assert _get_difference(burst_bw_first_time_achieved, iperf_out_bw) > 100
+#     print('_get_difference(burst_bw_first_time_achieved, iperf_out_bw) {}'.format(_get_difference(burst_bw_first_time_achieved, iperf_out_bw)))
+
     # Test that the bandwidth we obtained second time is at least two times
     # lower than the one obtained when no rate limiting is in place.
     assert _get_difference(rate_no_limit_bytes, iperf_out_bw) > 100
+#     print('_get_difference(rate_no_limit_bytes, iperf_out_bw) {}'.format(_get_difference(rate_no_limit_bytes, iperf_out_bw)))
 
     burst_consumed_time_achieved = iperf_out_time
     # We expect it to take around 1 sec now.
@@ -248,35 +262,41 @@ def _check_rx_rate_limiting(test_microvm, guest_ips):
 
     # First step: get the transfer rate when no rate limiting is enabled.
     # We are receiving the result in KBytes from iperf; 1000 converts to Bytes.
-    iperf_cmd = '{} {} -c {} -t{} -f KBytes'.format(
+    iperf_cmd = '{} {} -c {} -t{} -f KBytes -O {}'.format(
         test_microvm.jailer.netns_cmd_prefix(),
         IPERF_BINARY,
         guest_ips[0],
-        IPERF_TRANSMIT_TIME
+        IPERF_TRANSMIT_TIME,
+        IPERF_OMIT_TIME
     )
     iperf_out = _run_local_iperf(iperf_cmd)
     iperf_out = _process_iperf_output(iperf_out)[1]
 
     rate_no_limit_bytes = float(iperf_out)
+#     print('rate_no_limit_bytes {}'.format(rate_no_limit_bytes))
 
     # Second step: get the number of bytes when rate limiting is on.
 
     # Calculate the number of bytes that are expected to be sent
     # in each second once the rate limiting is enabled.
     rate_limit_bps = 1000 * RATE_LIMIT_BYTES / float(RATE_LIMIT_REFILL_TIME)
+#     print('rate_limit_bps {}'.format(rate_limit_bps))
 
-    # Use iperf for 2 seconds to get the number of bytes it sent with rate
+    # Use iperf for 3 seconds to get the number of bytes it sent with rate
     # limiting on.
-    iperf_cmd = '{} {} -c {} -t{} -f KBytes'.format(
+    iperf_cmd = '{} {} -c {} -t{} -f KBytes -O {}'.format(
         test_microvm.jailer.netns_cmd_prefix(),
         IPERF_BINARY,
         guest_ips[1],
-        IPERF_TRANSMIT_TIME
+        IPERF_TRANSMIT_TIME,
+        IPERF_OMIT_TIME
     )
     iperf_out = _run_local_iperf(iperf_cmd)
     iperf_out = _process_iperf_output(iperf_out)[1]
     rate_limit_bytes_achieved = 1000 * float(iperf_out)
     rate_limit_bytes_expected = rate_limit_bps
+#     print('rate_limit_bytes_achieved {}'.format(rate_limit_bytes_achieved))
+#     print('rate_limit_bytes_expected {}'.format(rate_limit_bytes_expected))
 
     # Assert on the bytes expected and achieved with rate limiting on; we are
     # expecting a difference no bigger than MAX_RATE_LIMIT_BYTES_DIFF
@@ -297,7 +317,8 @@ def _check_rx_rate_limiting(test_microvm, guest_ips):
         test_microvm.jailer.netns_cmd_prefix(),
         IPERF_BINARY,
         guest_ips[2],
-        BURST_SIZE)
+        BURST_SIZE
+    )
     iperf_out = _run_local_iperf(iperf_cmd)
 
     # iperf will give variable number of output lines depending on how much
@@ -378,10 +399,11 @@ def _check_tx_bandwidth(
     At this point, a daemonized iperf3 server is expected to be running on
     the host.
     """
-    iperf_cmd = "{} -c {} -t {} -f KBytes".format(
+    iperf_cmd = "{} -c {} -t {} -f KBytes -O {}".format(
         IPERF_BINARY,
         host_ip,
-        IPERF_TRANSMIT_TIME
+        IPERF_TRANSMIT_TIME,
+        IPERF_OMIT_TIME
     )
 
     iperf_out = _run_iperf_on_guest(test_microvm, iperf_cmd, guest_ip)
@@ -401,11 +423,12 @@ def _check_rx_bandwidth(
     At this point, a daemonized iperf3 server is expected to be running on
     the guest.
     """
-    iperf_cmd = "{} {} -c {} -t {} -f KBytes".format(
+    iperf_cmd = "{} {} -c {} -t {} -f KBytes -O {}".format(
         test_microvm.jailer.netns_cmd_prefix(),
         IPERF_BINARY,
         guest_ip,
-        IPERF_TRANSMIT_TIME
+        IPERF_TRANSMIT_TIME,
+        IPERF_OMIT_TIME
     )
     iperf_out = _run_local_iperf(iperf_cmd)
     _, observed_bw = _process_iperf_output(iperf_out)
@@ -448,6 +471,7 @@ def _start_iperf_on_guest(test_microvm, hostname):
 
 def _run_iperf_on_guest(test_microvm, iperf_cmd, hostname):
     """Run a client related iperf command through an SSH connection."""
+#     print('GUEST {}'.format(iperf_cmd))
     test_microvm.ssh_config['hostname'] = hostname
     ssh_connection = net_tools.SSHConnection(test_microvm.ssh_config)
     _, stdout, stderr = ssh_connection.execute_command(iperf_cmd)
@@ -475,6 +499,7 @@ def _start_local_iperf(netns_cmd_prefix):
 
 def _run_local_iperf(iperf_cmd):
     """Execute a client related iperf command locally."""
+#     print('LOCAL {}'.format(iperf_cmd))
     process = utils.run_cmd(iperf_cmd)
     return process.stdout
 
@@ -491,13 +516,14 @@ def _get_difference(current, previous):
 
 
 def _process_iperf_output(iperf_out):
-    """Parse iperf 3 output and return test time and bandwidth."""
+    """Parse iperf3 output and return test time and bandwidth."""
+#     print('\n===========\n_process_iperf_output')
+#     print(iperf_out)
     found_line = 0
     iperf_out_lines = iperf_out.splitlines()
     for line in iperf_out_lines:
         if line.find('- - - - - - - -') != -1:
             found_line += 1
-
         if found_line == 3:
             iperf_out_time = line.split('  ')[2].split(
                 '-'
@@ -509,4 +535,6 @@ def _process_iperf_output(iperf_out):
         if found_line > 0:
             # Skip the first 3 lines after the first line containing `------`
             found_line += 1
+#         print('{}\t{}'.format(found_line, line))
+#     print('{} {}\nEND\n\n\n'.format(iperf_out_time, iperf_out_bw))
     return float(iperf_out_time), float(iperf_out_bw)
