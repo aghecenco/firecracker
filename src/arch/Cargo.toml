@@ -12,7 +12,7 @@ libc = ">=0.2.39"
 arch_gen = { path = "../arch_gen" }
 utils = { path = "../utils" }
 
-linux-loader = { git = "https://github.com/aghecenco/linux-loader", branch = "bootcfg" }
+linux-loader = { git = "https://github.com/aghecenco/linux-loader", branch = "elf_load_addr" }
 
 [dev-dependencies]
 device_tree = ">=1.1.0"

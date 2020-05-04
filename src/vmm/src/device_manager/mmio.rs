@@ -14,8 +14,8 @@ use arch::aarch64::DeviceInfoForFDT;
 use arch::DeviceType;
 use devices;
 use devices::{virtio::MmioTransport, BusDevice};
-use kernel::cmdline as kernel_cmdline;
 use kvm_ioctls::{IoEventAddress, VmFd};
+use linux_loader::cmdline as kernel_cmdline;
 #[cfg(target_arch = "aarch64")]
 use utils::eventfd::EventFd;
 use versionize::{VersionMap, Versionize, VersionizeResult};

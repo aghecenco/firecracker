@@ -1390,6 +1390,8 @@ enum VcpuEmulation {
 pub(crate) mod tests {
     #[cfg(target_arch = "x86_64")]
     use std::convert::TryInto;
+    #[cfg(target_arch = "x86_64")]
+    use std::ffi::CString;
     use std::fmt;
     use std::fs::File;
     #[cfg(target_arch = "x86_64")]
@@ -1403,6 +1405,10 @@ pub(crate) mod tests {
     use super::super::devices;
     use super::*;
 
+    #[cfg(target_arch = "x86_64")]
+    use linux_loader::loader::elf::Elf as Loader;
+    #[cfg(target_arch = "x86_64")]
+    use linux_loader::loader::KernelLoader;
     use utils::signal::validate_signal_num;
 
     impl PartialEq for VcpuResponse {
@@ -1765,33 +1771,29 @@ pub(crate) mod tests {
     fn load_good_kernel(vm_memory: &GuestMemoryMmap) -> GuestAddress {
         use vmm_config::boot_source::DEFAULT_KERNEL_CMDLINE;
 
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let parent = path.parent().unwrap();
-
-        let kernel_path: PathBuf = [parent.to_str().unwrap(), "kernel/src/loader/test_elf.bin"]
-            .iter()
-            .collect();
-
+        let mut kernel_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        kernel_path.push("tests/mock_resources/test_elf.bin");
         let mut kernel_file = File::open(kernel_path).expect("Cannot open kernel file");
-        let mut cmdline = kernel::cmdline::Cmdline::new(arch::CMDLINE_MAX_SIZE);
+        let mut cmdline = linux_loader::cmdline::Cmdline::new(arch::CMDLINE_MAX_SIZE);
         assert!(cmdline.insert_str(DEFAULT_KERNEL_CMDLINE).is_ok());
         let cmdline_addr = GuestAddress(arch::x86_64::layout::CMDLINE_START);
 
-        let entry_addr = kernel::loader::load_kernel(
+        let load_result = Loader::load::<File, GuestMemoryMmap>(
             vm_memory,
+            None,
             &mut kernel_file,
-            arch::x86_64::layout::HIMEM_START,
+            Some(GuestAddress(arch::x86_64::layout::HIMEM_START)),
         )
         .expect("failed to load kernel");
 
-        kernel::loader::load_cmdline(
+        linux_loader::loader::load_cmdline(
             vm_memory,
             cmdline_addr,
-            &cmdline.as_cstring().expect("failed to convert to cstring"),
+            &CString::new(cmdline).unwrap(),
         )
         .expect("failed to load cmdline");
 
-        entry_addr
+        load_result.kernel_load
     }
 
     #[cfg(target_arch = "x86_64")]

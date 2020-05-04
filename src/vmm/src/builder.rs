@@ -3,6 +3,7 @@
 
 //! Enables pre-boot setup, instantiation and booting of a Firecracker VMM.
 
+use std::ffi::CString;
 use std::fmt::{Display, Formatter};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -16,7 +17,12 @@ use device_manager::legacy::PortIODeviceManager;
 use device_manager::mmio::MMIODeviceManager;
 use devices::legacy::Serial;
 use devices::virtio::{MmioTransport, Vsock, VsockUnixBackend};
-use kernel::cmdline::Cmdline as KernelCmdline;
+use linux_loader::cmdline::Cmdline;
+#[cfg(target_arch = "x86_64")]
+use linux_loader::loader::elf::Elf as Loader;
+#[cfg(target_arch = "aarch64")]
+use linux_loader::loader::pe::PE as Loader;
+use linux_loader::loader::KernelLoader;
 use polly::event_manager::{Error as EventManagerError, EventManager};
 use seccomp::BpfProgramRef;
 use utils::eventfd::EventFd;
@@ -51,9 +57,9 @@ pub enum StartMicrovmError {
     /// The kernel command line is invalid.
     KernelCmdline(String),
     /// Cannot load kernel due to invalid memory configuration or invalid kernel image.
-    KernelLoader(kernel::loader::Error),
+    KernelLoader(linux_loader::loader::Error),
     /// Cannot load command line string.
-    LoadCommandline(kernel::cmdline::Error),
+    LoadCommandline(linux_loader::loader::Error),
     /// The start command was issued more than once.
     MicroVMAlreadyRunning,
     /// Cannot start the VM because the kernel was not configured.
@@ -74,10 +80,10 @@ pub enum StartMicrovmError {
     RegisterVsockDevice(device_manager::mmio::Error),
 }
 
-/// It's convenient to automatically convert `kernel::cmdline::Error`s
+/// It's convenient to automatically convert `linux_loader::cmdline::Error`s
 /// to `StartMicrovmError`s.
-impl std::convert::From<kernel::cmdline::Error> for StartMicrovmError {
-    fn from(e: kernel::cmdline::Error) -> StartMicrovmError {
+impl std::convert::From<linux_loader::cmdline::Error> for StartMicrovmError {
+    fn from(e: linux_loader::cmdline::Error) -> StartMicrovmError {
         StartMicrovmError::KernelCmdline(e.to_string())
     }
 }
@@ -380,11 +386,20 @@ fn load_kernel(
         .try_clone()
         .map_err(|e| StartMicrovmError::Internal(Error::KernelFile(e)))?;
 
-    let entry_addr =
-        kernel::loader::load_kernel(guest_memory, &mut kernel_file, arch::get_kernel_start())
-            .map_err(StartMicrovmError::KernelLoader)?;
+    let load_result = Loader::load::<std::fs::File, GuestMemoryMmap>(
+        guest_memory,
+        Some(GuestAddress(arch::get_kernel_start())),
+        &mut kernel_file,
+        // High memory address is x86-specific.
+        // In our case, it's the same as the kernel load point.
+        #[cfg(target_arch = "x86_64")]
+        Some(GuestAddress(arch::get_kernel_start())),
+        #[cfg(target_arch = "aarch64")]
+        None,
+    )
+    .map_err(StartMicrovmError::KernelLoader)?;
 
-    Ok(entry_addr)
+    Ok(load_result.kernel_load)
 }
 
 fn load_initrd_from_config(
@@ -520,7 +535,7 @@ fn create_pio_dev_manager_with_legacy_devs(
 fn attach_legacy_devices(
     vm: &Vm,
     mmio_device_manager: &mut MMIODeviceManager,
-    kernel_cmdline: &mut kernel::cmdline::Cmdline,
+    kernel_cmdline: &mut linux_loader::cmdline::Cmdline,
     serial: Option<Arc<Mutex<Serial>>>,
 ) -> std::result::Result<(), StartMicrovmError> {
     if let Some(serial) = serial {
@@ -575,7 +590,7 @@ pub fn configure_system_for_boot(
     _vcpu_config: VcpuConfig,
     entry_addr: GuestAddress,
     initrd: &Option<InitrdConfig>,
-    kernel_cmdline: KernelCmdline,
+    kernel_cmdline: Cmdline,
 ) -> std::result::Result<(), StartMicrovmError> {
     #[cfg(target_arch = "x86_64")]
     {
@@ -587,18 +602,18 @@ pub fn configure_system_for_boot(
 
         // Write the kernel command line to guest memory. This is x86_64 specific, since on
         // aarch64 the command line will be specified through the FDT.
-        kernel::loader::load_cmdline(
+        let cmdline_size = kernel_cmdline.as_str().len() + 1;
+        linux_loader::loader::load_cmdline::<GuestMemoryMmap>(
             vmm.guest_memory(),
             GuestAddress(arch::x86_64::layout::CMDLINE_START),
-            &kernel_cmdline
-                .as_cstring()
-                .map_err(StartMicrovmError::LoadCommandline)?,
+            &CString::new(kernel_cmdline)
+                .map_err(|e| StartMicrovmError::KernelCmdline(e.to_string()))?,
         )
         .map_err(StartMicrovmError::LoadCommandline)?;
         arch::x86_64::configure_system(
             &vmm.guest_memory,
             vm_memory::GuestAddress(arch::x86_64::layout::CMDLINE_START),
-            kernel_cmdline.len() + 1,
+            cmdline_size,
             initrd,
             vcpus.len() as u8,
         )
@@ -615,9 +630,8 @@ pub fn configure_system_for_boot(
         let vcpu_mpidr = vcpus.into_iter().map(|cpu| cpu.get_mpidr()).collect();
         arch::aarch64::configure_system(
             &vmm.guest_memory,
-            &kernel_cmdline
-                .as_cstring()
-                .map_err(StartMicrovmError::LoadCommandline)?,
+            &CString::new(kernel_cmdline)
+                .map_err(|e| StartMicrovmError::KernelCmdline(e.to_string()))?,
             vcpu_mpidr,
             vmm.mmio_device_manager.get_device_info(),
             vmm.vm.get_irqchip(),
@@ -630,7 +644,7 @@ pub fn configure_system_for_boot(
 
 fn attach_block_devices(
     vmm: &mut Vmm,
-    cmdline: &mut KernelCmdline,
+    cmdline: &mut Cmdline,
     blocks: &BlockBuilder,
     event_manager: &mut EventManager,
 ) -> std::result::Result<(), StartMicrovmError> {
@@ -670,7 +684,7 @@ fn attach_block_devices(
 
 fn attach_net_devices(
     vmm: &mut Vmm,
-    cmdline: &mut KernelCmdline,
+    cmdline: &mut Cmdline,
     net_builder: &NetBuilder,
     event_manager: &mut EventManager,
 ) -> std::result::Result<(), StartMicrovmError> {
@@ -693,7 +707,7 @@ fn attach_net_devices(
 
 fn attach_unixsock_vsock_device(
     vmm: &mut Vmm,
-    cmdline: &mut KernelCmdline,
+    cmdline: &mut Cmdline,
     unix_vsock: &Arc<Mutex<Vsock<VsockUnixBackend>>>,
     event_manager: &mut EventManager,
 ) -> std::result::Result<(), StartMicrovmError> {
@@ -720,7 +734,7 @@ pub mod tests {
     use super::*;
     use arch::DeviceType;
     use devices::virtio::{TYPE_BLOCK, TYPE_VSOCK};
-    use kernel::cmdline::Cmdline;
+    use linux_loader::cmdline::Cmdline;
     use polly::event_manager::EventManager;
     use utils::tempfile::TempFile;
     use vmm_config::boot_source::DEFAULT_KERNEL_CMDLINE;
@@ -771,7 +785,7 @@ pub mod tests {
     }
 
     pub(crate) fn default_kernel_cmdline() -> Cmdline {
-        let mut kernel_cmdline = kernel::cmdline::Cmdline::new(4096);
+        let mut kernel_cmdline = Cmdline::new(4096);
         kernel_cmdline.insert_str(DEFAULT_KERNEL_CMDLINE).unwrap();
         kernel_cmdline
     }
@@ -1145,10 +1159,7 @@ pub mod tests {
         let err = KernelCmdline(String::from("dummy --cmdline"));
         let _ = format!("{}{:?}", err, err);
 
-        let err = KernelLoader(kernel::loader::Error::InvalidElfMagicNumber);
-        let _ = format!("{}{:?}", err, err);
-
-        let err = LoadCommandline(kernel::cmdline::Error::TooLarge);
+        let err = KernelLoader(linux_loader::loader::Error::CommandLineCopy);
         let _ = format!("{}{:?}", err, err);
 
         let err = MicroVMAlreadyRunning;
@@ -1189,7 +1200,7 @@ pub mod tests {
 
     #[test]
     fn test_kernel_cmdline_err_to_startuvm_err() {
-        let err = StartMicrovmError::from(kernel::cmdline::Error::HasSpace);
+        let err = StartMicrovmError::from(linux_loader::cmdline::Error::HasSpace);
         let _ = format!("{}{:?}", err, err);
     }
 }

@@ -8,7 +8,7 @@ kvm-bindings = { git = "https://github.com/firecracker-microvm/kvm-bindings", ta
 kvm-ioctls = { git = "https://github.com/firecracker-microvm/kvm-ioctls", tag = "v0.5.0-1" }
 lazy_static = "1.4.0"
 libc = ">=0.2.39"
-linux-loader = { git = "https://github.com/aghecenco/linux-loader", branch = "bootcfg" }
+linux-loader = { git = "https://github.com/aghecenco/linux-loader", branch = "elf_load_addr" }
 serde = ">=1.0.27"
 serde_derive = ">=1.0.27"
 serde_json = ">=1.0.9"
@@ -19,7 +19,6 @@ versionize_derive = { git = "https://github.com/firecracker-microvm/versionize_d
 arch = { path = "../arch" }
 devices = { path = "../devices" }
 dumbo = { path = "../dumbo" }
-kernel = { path = "../kernel" }
 logger = { path = "../logger" }
 vm-memory = { version = ">=0.2.0", features = ["backend-mmap"] }
 mmds = { path = "../mmds" }

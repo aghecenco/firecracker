@@ -25,7 +25,7 @@ extern crate arch;
 #[cfg(target_arch = "x86_64")]
 extern crate cpuid;
 extern crate devices;
-extern crate kernel;
+extern crate linux_loader;
 #[macro_use]
 extern crate logger;
 extern crate dumbo;
@@ -129,6 +129,8 @@ pub enum Error {
     #[cfg(target_arch = "x86_64")]
     /// Cannot add devices to the Legacy I/O Bus.
     LegacyIOBus(device_manager::legacy::Error),
+    /// Cannot load command line.
+    LoadCommandline(linux_loader::cmdline::Error),
     /// Internal logger error.
     Logger(LoggerError),
     /// Internal metrics system error.
@@ -176,6 +178,7 @@ impl Display for Error {
             KvmContext(e) => write!(f, "Failed to validate KVM support: {:?}", e),
             #[cfg(target_arch = "x86_64")]
             LegacyIOBus(e) => write!(f, "Cannot add devices to the legacy I/O Bus. {}", e),
+            LoadCommandline(e) => write!(f, "Cannot load command line. {}", e),
             Logger(e) => write!(f, "Logger error: {}", e),
             Metrics(e) => write!(f, "Metrics error: {}", e),
             RegisterMMIODevice(e) => write!(f, "Cannot add a device to the MMIO Bus. {}", e),
