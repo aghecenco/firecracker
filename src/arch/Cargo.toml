@@ -6,12 +6,13 @@ authors = ["The Chromium OS Authors"]
 [dependencies]
 kvm-bindings = { git = "https://github.com/firecracker-microvm/kvm-bindings", tag = "v0.2.0-1", features = ["fam-wrappers"] }
 kvm-ioctls = { git = "https://github.com/firecracker-microvm/kvm-ioctls", tag = "v0.5.0-1" }
+
+vm-memory = { version = ">=0.2.0", features = ["backend-mmap"] }
 libc = ">=0.2.39"
+arch_gen = { path = "../arch_gen" }
 utils = { path = "../utils" }
 
-arch_gen = { path = "../arch_gen" }
-vm-memory = { version = ">=0.2.0", features = ["backend-mmap"] }
+linux-loader = { git = "https://github.com/aghecenco/linux-loader", branch = "bootcfg" }
 
 [dev-dependencies]
-utils = { path = "../utils" }
 device_tree = ">=1.1.0"
