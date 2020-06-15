@@ -1,0 +1,25 @@
+From 5f4e3e76d0f0b70a0598670ebad7ba74e21a6bf5 Mon Sep 17 00:00:00 2001
+From: Alexandra Iordache <aghecen@amazon.com>
+Date: Mon, 15 Jun 2020 18:09:57 +0300
+Subject: [PATCH] seccomp filter: forgot KVM_SET_DEBUGREGS ioctl
+
+Signed-off-by: Alexandra Iordache <aghecen@amazon.com>
+---
+ src/vmm/src/default_syscalls/mod.rs | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/src/vmm/src/default_syscalls/mod.rs b/src/vmm/src/default_syscalls/mod.rs
+index 5c56cb5..ac4dcc8 100644
+--- a/src/vmm/src/default_syscalls/mod.rs
++++ b/src/vmm/src/default_syscalls/mod.rs
+@@ -141,7 +141,6 @@ fn create_ioctl_seccomp_rule() -> Result<Vec<SeccompRule>, Error> {
+         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_VCPU_EVENTS)?],
+         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_SET_VCPU_EVENTS)?],
+         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_DEBUGREGS)?],
+-        and![Cond::new(1, ArgLen::DWORD, Eq, KVM_SET_DEBUGREGS)?],
+         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_XSAVE)?],
+         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_SET_XSAVE)?],
+         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_XCRS)?],
+-- 
+2.7.4
+
