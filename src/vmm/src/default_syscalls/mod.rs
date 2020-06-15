@@ -141,7 +141,6 @@ fn create_ioctl_seccomp_rule() -> Result<Vec<SeccompRule>, Error> {
         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_VCPU_EVENTS)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_SET_VCPU_EVENTS)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_DEBUGREGS)?],
-        and![Cond::new(1, ArgLen::DWORD, Eq, KVM_SET_DEBUGREGS)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_XSAVE)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_SET_XSAVE)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_XCRS)?],
