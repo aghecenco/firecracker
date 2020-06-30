@@ -25,8 +25,11 @@
   snapshot.
 - Added a new API call, `PUT /snapshot/load`, for loading a snapshot.
 - Added metrics for the vsock device.
-- Added devtool strip command which removes debug symbols from the release
+- Added `devtool strip` command which removes debug symbols from the release
   binaries.
+- Added the `rx_malformed_frames` and `tx_malformed_frames` metrics for the
+  `virtio net` device, emitted when a frame missing the VNET header is
+  encountered.
 
 ### Fixed
 

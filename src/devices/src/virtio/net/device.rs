@@ -17,13 +17,13 @@ use dumbo::{EthernetFrame, MacAddr, MAC_ADDR_LEN};
 use libc::EAGAIN;
 use logger::{Metric, METRICS};
 use rate_limiter::{BucketUpdate, RateLimiter, TokenType};
-#[cfg(not(test))]
-use std::io::Read;
 use std::io::Write;
+#[cfg(not(test))]
+use std::io::{self, Read};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::{cmp, io, mem, result};
+use std::{cmp, mem, result};
 use utils::eventfd::EventFd;
 use utils::net::Tap;
 use virtio_gen::virtio_net::{
@@ -39,12 +39,20 @@ fn vnet_hdr_len() -> usize {
 
 // Frames being sent/received through the network device model have a VNET header. This
 // function returns a slice which holds the L2 frame bytes without this header.
-fn frame_bytes_from_buf(buf: &[u8]) -> &[u8] {
-    &buf[vnet_hdr_len()..]
+fn frame_bytes_from_buf(buf: &[u8]) -> Result<&[u8]> {
+    if buf.len() < vnet_hdr_len() {
+        Err(Error::VnetHeaderMissing)
+    } else {
+        Ok(&buf[vnet_hdr_len()..])
+    }
 }
 
-fn frame_bytes_from_buf_mut(buf: &mut [u8]) -> &mut [u8] {
-    &mut buf[vnet_hdr_len()..]
+fn frame_bytes_from_buf_mut(buf: &mut [u8]) -> Result<&mut [u8]> {
+    if buf.len() < vnet_hdr_len() {
+        Err(Error::VnetHeaderMissing)
+    } else {
+        Ok(&mut buf[vnet_hdr_len()..])
+    }
 }
 
 // This initializes to all 0 the VNET hdr part of a buf.
@@ -332,9 +340,9 @@ impl Net {
         frame_buf: &[u8],
         tap: &mut Tap,
         guest_mac: Option<MacAddr>,
-    ) -> bool {
+    ) -> Result<bool> {
         if let Some(ns) = mmds_ns {
-            if ns.detour_frame(frame_bytes_from_buf(frame_buf)) {
+            if ns.detour_frame(frame_bytes_from_buf(frame_buf)?) {
                 METRICS.mmds.rx_accepted.inc();
 
                 // MMDS frames are not accounted by the rate limiter.
@@ -342,7 +350,7 @@ impl Net {
                 rate_limiter.manual_replenish(1, TokenType::Ops);
 
                 // MMDS consumed the frame.
-                return true;
+                return Ok(true);
             }
         }
 
@@ -350,12 +358,13 @@ impl Net {
 
         // Check for guest MAC spoofing.
         if let Some(mac) = guest_mac {
-            let _ = EthernetFrame::from_bytes(&frame_buf[vnet_hdr_len()..]).and_then(|eth_frame| {
-                if mac != eth_frame.src_mac() {
-                    METRICS.net.tx_spoofed_mac_count.inc();
-                }
-                Ok(())
-            });
+            let _ =
+                EthernetFrame::from_bytes(frame_bytes_from_buf(frame_buf)?).and_then(|eth_frame| {
+                    if mac != eth_frame.src_mac() {
+                        METRICS.net.tx_spoofed_mac_count.inc();
+                    }
+                    Ok(())
+                });
         }
 
         let write_result = tap.write(frame_buf);
@@ -370,13 +379,14 @@ impl Net {
                 METRICS.net.tx_fails.inc();
             }
         };
-        false
+        Ok(false)
     }
 
     // We currently prioritize packets from the MMDS over regular network packets.
-    fn read_from_mmds_or_tap(&mut self) -> io::Result<usize> {
+    fn read_from_mmds_or_tap(&mut self) -> Result<usize> {
         if let Some(ns) = self.mmds_ns.as_mut() {
-            if let Some(len) = ns.write_next_frame(frame_bytes_from_buf_mut(&mut self.rx_frame_buf))
+            if let Some(len) =
+                ns.write_next_frame(frame_bytes_from_buf_mut(&mut self.rx_frame_buf)?)
             {
                 let len = len.get();
                 METRICS.mmds.tx_frames.inc();
@@ -386,7 +396,7 @@ impl Net {
             }
         }
 
-        self.read_tap()
+        self.read_tap().map_err(Error::IO)
     }
 
     fn process_rx(&mut self) -> result::Result<(), DeviceError> {
@@ -401,7 +411,7 @@ impl Net {
                         break;
                     }
                 }
-                Err(e) => {
+                Err(Error::IO(e)) => {
                     // The tap device is non-blocking, so any error aside from EAGAIN is
                     // unexpected.
                     match e.raw_os_error() {
@@ -413,6 +423,14 @@ impl Net {
                         }
                     };
                     break;
+                }
+                Err(Error::VnetHeaderMissing) => {
+                    error!("VNET header missing in the RX frame.");
+                    METRICS.net.rx_malformed_frames.inc();
+                    return Err(DeviceError::MalformedPayload);
+                }
+                Err(e) => {
+                    error!("Spurious error in network RX: {:?}", e);
                 }
             }
         }
@@ -529,7 +547,13 @@ impl Net {
                 &self.tx_frame_buf[..read_count],
                 &mut self.tap,
                 self.guest_mac,
-            ) && !self.rx_deferred_frame
+            )
+            .unwrap_or_else(|_| {
+                // Log an error, but don't stop processing the malformed frame.
+                error!("VNET header missing in the TX frame.");
+                METRICS.net.tx_malformed_frames.inc();
+                false
+            }) && !self.rx_deferred_frame
             {
                 // MMDS consumed this frame/request, let's also try to process the response.
                 process_rx_for_mmds = true;
@@ -893,6 +917,16 @@ pub(crate) mod tests {
 
     #[test]
     fn test_vnet_helpers() {
+        let mut frame_buf = vec![42u8; vnet_hdr_len() - 1];
+        assert_eq!(
+            format!("{:?}", frame_bytes_from_buf(&frame_buf)),
+            "Err(VnetHeaderMissing)"
+        );
+        assert_eq!(
+            format!("{:?}", frame_bytes_from_buf_mut(&mut frame_buf)),
+            "Err(VnetHeaderMissing)"
+        );
+
         let mut frame_buf: [u8; MAX_BUFFER_SIZE] = [42u8; MAX_BUFFER_SIZE];
 
         let vnet_hdr_len_ = mem::size_of::<virtio_net_hdr_v1>();
@@ -903,10 +937,10 @@ pub(crate) mod tests {
         assert_eq!(zero_vnet_hdr, &frame_buf[..vnet_hdr_len_]);
 
         let payload = vec![42u8; MAX_BUFFER_SIZE - vnet_hdr_len_];
-        assert_eq!(payload, frame_bytes_from_buf(&frame_buf));
+        assert_eq!(payload, frame_bytes_from_buf(&frame_buf).unwrap());
 
         {
-            let payload = frame_bytes_from_buf_mut(&mut frame_buf);
+            let payload = frame_bytes_from_buf_mut(&mut frame_buf).unwrap();
             payload[0] = 15;
         }
         assert_eq!(frame_buf[vnet_hdr_len_], 15);
@@ -1050,18 +1084,41 @@ pub(crate) mod tests {
             net.rx_bytes_read = 0;
         }
 
+        {
+            // Send an invalid frame (too small, VNET header missing).
+            txq.avail.idx.set(1);
+            txq.avail.ring[0].set(0);
+            txq.dtable[0].set(daddr, 1, 0, 0);
+
+            // Trigger the TX handler.
+            net.queue_evts[TX_INDEX].write(1).unwrap();
+            let event = EpollEvent::new(EventSet::IN, net.queue_evts[TX_INDEX].as_raw_fd() as u64);
+            check_metric_after_block!(
+                &METRICS.net.tx_malformed_frames,
+                1,
+                net.process(&event, &mut event_manager)
+            );
+
+            // Make sure the data queue advanced.
+            assert_eq!(txq.used.idx.get(), 1);
+
+            // On the RX path, the VNET header size issue could only manifest when MMDS is active
+            // on the net device, but even in that scenario, `rx_frame_buf` is large enough to
+            // accommodate VNET (see `MAX_BUFFER_SIZE`).
+        }
+
         // Now let's move on to the actual device events.
         {
             // testing TX_QUEUE_EVENT
-            txq.avail.idx.set(1);
-            txq.avail.ring[0].set(0);
-            txq.dtable[0].set(daddr, 0x1000, 0, 0);
+            txq.avail.idx.set(2);
+            txq.avail.ring[1].set(1);
+            txq.dtable[1].set(daddr, 0x1000, 0, 0);
 
             net.queue_evts[TX_INDEX].write(1).unwrap();
             let event = EpollEvent::new(EventSet::IN, net.queue_evts[TX_INDEX].as_raw_fd() as u64);
             net.process(&event, &mut event_manager);
             // Make sure the data queue advanced.
-            assert_eq!(txq.used.idx.get(), 1);
+            assert_eq!(txq.used.idx.get(), 2);
         }
 
         {
@@ -1078,7 +1135,7 @@ pub(crate) mod tests {
             let tap_event = EpollEvent::new(EventSet::IN, net.tap.as_raw_fd() as u64);
             net.process(&tap_event, &mut event_manager);
             assert!(net.rx_deferred_frame);
-            assert_eq!(net.interrupt_evt.read().unwrap(), 3);
+            assert_eq!(net.interrupt_evt.read().unwrap(), 4);
             // The #cfg(test) enabled version of read_tap always returns 1234 bytes (or the len of
             // the buffer, whichever is smaller).
             assert_eq!(rxq.used.ring[0].get().len, 1234);
@@ -1162,7 +1219,7 @@ pub(crate) mod tests {
         {
             // Create an ethernet frame.
             let eth_frame_i = EthernetFrame::write_incomplete(
-                frame_bytes_from_buf_mut(&mut net.tx_frame_buf),
+                frame_bytes_from_buf_mut(&mut net.tx_frame_buf).unwrap(),
                 tha,
                 sha,
                 ETHERTYPE_ARP,
@@ -1198,7 +1255,8 @@ pub(crate) mod tests {
                 &net.tx_frame_buf[..packet_len],
                 &mut net.tap,
                 Some(sha),
-            ))
+            )
+            .unwrap())
         );
 
         // Validate that MMDS has a response and we can retrieve it.
@@ -1223,7 +1281,7 @@ pub(crate) mod tests {
         {
             // Create an ethernet frame.
             let eth_frame_i = EthernetFrame::write_incomplete(
-                frame_bytes_from_buf_mut(&mut net.tx_frame_buf),
+                frame_bytes_from_buf_mut(&mut net.tx_frame_buf).unwrap(),
                 dst_mac,
                 guest_mac,
                 ETHERTYPE_ARP,
